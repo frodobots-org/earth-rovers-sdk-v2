@@ -15,6 +15,10 @@ import cv2
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_auth_headers
+
+HEADERS = rover_auth_headers()
+
 
 async def fetch_dual_frames(session: aiohttp.ClientSession) -> tuple:
     """Fetch both camera frames in a single request (optimized)."""
@@ -39,7 +43,7 @@ async def display_dual_stream():
     print("Starting dual camera stream...")
     print("Press 'q' to quit")
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         frame_count = 0
         start_time = asyncio.get_event_loop().time()
 
@@ -95,7 +99,7 @@ async def capture_snapshot():
     """Capture and save a single snapshot from both cameras."""
     print("Capturing snapshot...")
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         front_b64, rear_b64, timestamp = await fetch_dual_frames(session)
 
         front_frame = decode_frame(front_b64)

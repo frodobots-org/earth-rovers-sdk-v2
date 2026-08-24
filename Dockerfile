@@ -15,4 +15,7 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-CMD ["python3", "-m", "hypercorn", "main:app", "--bind", "0.0.0.0:8000"]
+# Loopback-only unless the operator explicitly opts into container-network
+# access with ROVER_BIND_HOST=0.0.0.0. docker-compose.yml does that internally
+# while still publishing the host port on 127.0.0.1 only.
+CMD ["sh", "-c", "exec python3 -m hypercorn main:app --bind \"${ROVER_BIND_HOST:-127.0.0.1}:8000\""]

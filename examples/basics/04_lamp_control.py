@@ -7,15 +7,18 @@ while stationary or while moving.
 Lamp values: 0 = off, 1 = on
 """
 
-import requests
 import time
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_session
+
+SESSION = rover_session()
+
 
 def send_command(linear: float, angular: float, lamp: int = 0):
     """Send a movement command to the rover."""
-    response = requests.post(
+    response = SESSION.post(
         f"{BASE_URL}/control",
         json={"command": {"linear": linear, "angular": angular, "lamp": lamp}},
     )

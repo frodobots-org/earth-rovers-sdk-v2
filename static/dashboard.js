@@ -7,6 +7,15 @@
     return document.getElementById(id);
   };
 
+  // Every same-origin API call this page makes needs the shared secret this
+  // page itself was loaded with (see GET / in main.py).
+  var AUTH_HEADER = { Authorization: "Bearer " + (DASH.apiKey || "") };
+  function apiFetch(url, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, AUTH_HEADER, opts.headers || {});
+    return fetch(url, opts);
+  }
+
   /* ---------- Header / mission lifecycle ---------- */
 
   if (DASH.botSlug) $("bot-chip").textContent = DASH.botSlug;
@@ -115,17 +124,17 @@
     var request;
     if (stopping) {
       // Dispatch a confirmed zero command before ending the remote ride.
-      request = fetch("/control", {
+      request = apiFetch("/control", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command: { linear: 0, angular: 0 } }),
       })
         .catch(function () {})
         .then(function () {
-          return fetch("/end-mission", { method: "POST" });
+          return apiFetch("/end-mission", { method: "POST" });
         });
     } else {
-      request = fetch("/start-mission", { method: "POST" });
+      request = apiFetch("/start-mission", { method: "POST" });
     }
 
     request
@@ -335,7 +344,8 @@
     ws = new WebSocket(
       (location.protocol === "https:" ? "wss://" : "ws://") +
         location.host +
-        "/ws/data"
+        "/ws/data?key=" +
+        encodeURIComponent(DASH.apiKey || "")
     );
     ws.onopen = function () {
       setLed("led-telemetry", "on");
@@ -378,7 +388,7 @@
   });
 
   // One initial fetch so the page isn't blank while real time is off.
-  fetch("/data")
+  apiFetch("/data")
     .then(function (r) {
       return r.ok ? r.json() : null;
     })
@@ -389,7 +399,7 @@
 
   // Light status poll for the rover LED (works with real time off).
   function pollStatus() {
-    fetch("/status")
+    apiFetch("/status")
       .then(function (r) {
         return r.ok ? r.json() : null;
       })
@@ -452,7 +462,7 @@
     var command = pendingCommand;
     pendingCommand = null;
     commandInFlight = true;
-    fetch("/control", {
+    apiFetch("/control", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ command: command }),
@@ -614,7 +624,7 @@
     var btn = $("speak-btn");
     btn.disabled = true;
     btn.textContent = "Sending…";
-    fetch("/speak", {
+    apiFetch("/speak", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: text }),
@@ -664,7 +674,7 @@
     $("active-mission-slug").textContent = DASH.missionSlug || "mission";
     renderCheckpoints(null);
 
-    fetch("/checkpoints-list")
+    apiFetch("/checkpoints-list")
       .then(function (r) {
         return r.ok ? r.json() : null;
       })
@@ -710,7 +720,7 @@
     tabsLoaded.available = true;
     var list = $("available-list");
     list.innerHTML = '<p class="empty">Loading missions…</p>';
-    fetch("/missions")
+    apiFetch("/missions")
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
@@ -754,7 +764,7 @@
     tabsLoaded.history = true;
     var list = $("history-list");
     list.innerHTML = '<p class="empty">Loading history…</p>';
-    fetch("/missions-history")
+    apiFetch("/missions-history")
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
@@ -866,7 +876,7 @@
   $("checkpoint-btn").addEventListener("click", function () {
     var btn = this;
     btn.disabled = true;
-    fetch("/checkpoint-reached", { method: "POST" })
+    apiFetch("/checkpoint-reached", { method: "POST" })
       .then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok) {

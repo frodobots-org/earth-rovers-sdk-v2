@@ -9,18 +9,21 @@ This example demonstrates the intervention management system:
 Interventions track when human operators take control of the rover.
 """
 
-import requests
 import time
 import json
 from datetime import datetime
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_session
+
+SESSION = rover_session()
+
 
 def start_intervention():
     """Start an intervention period."""
     print("Starting intervention...")
-    response = requests.post(f"{BASE_URL}/interventions/start")
+    response = SESSION.post(f"{BASE_URL}/interventions/start")
     result = response.json()
     print(f"  Response: {json.dumps(result, indent=2)}")
     return result
@@ -29,7 +32,7 @@ def start_intervention():
 def end_intervention():
     """End the current intervention period."""
     print("Ending intervention...")
-    response = requests.post(f"{BASE_URL}/interventions/end")
+    response = SESSION.post(f"{BASE_URL}/interventions/end")
     result = response.json()
     print(f"  Response: {json.dumps(result, indent=2)}")
     return result
@@ -38,7 +41,7 @@ def end_intervention():
 def get_intervention_history():
     """Get the history of interventions."""
     print("Fetching intervention history...")
-    response = requests.get(f"{BASE_URL}/interventions/history")
+    response = SESSION.get(f"{BASE_URL}/interventions/history")
     result = response.json()
     return result
 
@@ -73,7 +76,7 @@ def display_intervention_history(history: list):
 
 def send_command(linear: float, angular: float, lamp: int = 0):
     """Send movement command."""
-    requests.post(
+    SESSION.post(
         f"{BASE_URL}/control",
         json={"command": {"linear": linear, "angular": angular, "lamp": lamp}}
     )

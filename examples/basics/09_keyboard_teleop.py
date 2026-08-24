@@ -30,6 +30,10 @@ except ImportError:
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_session
+
+SESSION = rover_session()
+
 
 class RoverController:
     def __init__(self):
@@ -42,7 +46,7 @@ class RoverController:
     def send_command(self):
         """Send current state to rover."""
         try:
-            requests.post(
+            SESSION.post(
                 f"{BASE_URL}/control",
                 json={"command": {
                     "linear": self.linear,
@@ -130,7 +134,7 @@ def main():
         pass
     finally:
         # Stop rover on exit
-        requests.post(
+        SESSION.post(
             f"{BASE_URL}/control",
             json={"command": {"linear": 0, "angular": 0, "lamp": 0}}
         )

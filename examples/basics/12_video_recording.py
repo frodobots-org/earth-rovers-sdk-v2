@@ -17,6 +17,10 @@ from datetime import datetime
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_auth_headers
+
+HEADERS = rover_auth_headers()
+
 
 async def fetch_frames(session: aiohttp.ClientSession) -> tuple:
     """Fetch camera frames."""
@@ -62,7 +66,7 @@ async def record_video(
     rear_writer = None
     frame_count = 0
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         start_time = time.time()
 
         while time.time() - start_time < duration:
@@ -150,7 +154,7 @@ async def timelapse_capture(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     frame_num = 0
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         start_time = time.time()
 
         while time.time() - start_time < duration:

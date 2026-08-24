@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+<!--
+  Cross-origin: this page calls the SDK server directly, so it needs
+  ALLOWED_ORIGINS set on the server to this page's serving origin. Serve it
+  with a local static server (e.g. `python3 -m http.server 5500` from this
+  directory) rather than opening the file directly -- browsers send
+  `Origin: null` for file:// pages, which CORS allowlists can't reliably match.
+-->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -196,6 +203,7 @@
     </div>
 
     <script>
+      const ROVER_API_KEY = ""; // paste your ROVER_API_KEY here
       const startButton = document.getElementById("startButton");
       const endButton = document.getElementById("endButton");
       const messageDiv = document.getElementById("message");
@@ -217,7 +225,8 @@
       const updateInterventionsList = async () => {
         try {
           const response = await fetch(
-            "http://localhost:8000/interventions/history"
+            "http://localhost:8000/interventions/history",
+            { headers: { Authorization: "Bearer " + ROVER_API_KEY } }
           );
           const data = await response.json();
 
@@ -261,6 +270,7 @@
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
+                Authorization: "Bearer " + ROVER_API_KEY,
               },
             }
           );
@@ -288,6 +298,7 @@
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
+                Authorization: "Bearer " + ROVER_API_KEY,
               },
             }
           );

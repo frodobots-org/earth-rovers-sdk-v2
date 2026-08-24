@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from playwright.async_api import Error as PlaywrightError
 
@@ -30,6 +31,17 @@ class FakeBrowser:
 
 
 class BrowserRecoveryTest(unittest.IsolatedAsyncioTestCase):
+    def test_sdk_page_url_strips_legacy_query_key(self):
+        service = BrowserService()
+        with patch(
+            "browser_service.SDK_PAGE_URL",
+            "http://127.0.0.1:8000/sdk?mode=drive&key=do-not-log-this",
+        ):
+            self.assertEqual(
+                service._sdk_page_url(),
+                "http://127.0.0.1:8000/sdk?mode=drive",
+            )
+
     async def test_stale_failure_cannot_destroy_new_generation(self):
         service = BrowserService()
         stale = FakePage(closed=True)

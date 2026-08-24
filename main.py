@@ -12,9 +12,17 @@ import asyncio
 
 import aiohttp
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Literal, Optional
 
@@ -60,12 +68,29 @@ async def lifespan(app: FastAPI):
     await app.state.http_session.close()
 
 
-app = FastAPI(lifespan=lifespan)
+# No public API docs on a LAN rover server: /docs, /redoc and /openapi.json
+# would otherwise stay reachable without the API key.
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
+# Cross-origin *browser* JS is denied by default: this server has no notion of
+# "known" origins (the dashboard is same-origin; every other consumer is a
+# non-browser HTTP client that CORS doesn't govern anyway). Set ALLOWED_ORIGINS
+# (comma-separated) only if a separately-hosted frontend needs cross-origin
+# fetch access.
+_allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if "*" in _allowed_origins or "null" in _allowed_origins:
+    raise SystemExit(
+        'ALLOWED_ORIGINS must list explicit trusted origins; "*" and "null" '
+        "are not allowed on a rover control server."
+    )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,6 +113,72 @@ checkpoints_list_data = {}
 auth_lock = None
 auth_lock_loop = None
 INGEST_TOKEN = secrets.token_urlsafe(32)
+
+# Every control/data/dashboard entry point requires this shared secret. If the
+# operator doesn't set one, generate a per-run key rather than defaulting to
+# open access, and log it so it can still be retrieved.
+_PLACEHOLDER_API_KEY = "change-me-to-a-long-random-value"
+_MIN_API_KEY_LENGTH = 32
+ROVER_API_KEY = os.getenv("ROVER_API_KEY")
+if ROVER_API_KEY == _PLACEHOLDER_API_KEY:
+    raise SystemExit(
+        "ROVER_API_KEY is still set to the docker-compose.yml placeholder "
+        f'("{_PLACEHOLDER_API_KEY}") - set it to a real secret before starting.'
+    )
+if ROVER_API_KEY and (
+    len(ROVER_API_KEY) < _MIN_API_KEY_LENGTH or ROVER_API_KEY.strip() != ROVER_API_KEY
+):
+    raise SystemExit(
+        "ROVER_API_KEY must be at least 32 characters and must not have "
+        "leading or trailing whitespace. Generate one with: "
+        'python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
+    )
+if not ROVER_API_KEY:
+    ROVER_API_KEY = secrets.token_urlsafe(32)
+    logger.warning(
+        "ROVER_API_KEY not set - generated a key for this run (set ROVER_API_KEY "
+        "in the environment to keep it stable across restarts): %s",
+        ROVER_API_KEY,
+    )
+
+
+def _valid_api_key(supplied: str) -> bool:
+    return bool(supplied) and hmac.compare_digest(supplied, ROVER_API_KEY)
+
+
+def _key_from_headers(request: Request) -> str:
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header[:7].lower() == "bearer ":
+        return auth_header[len("Bearer ") :]
+    return request.headers.get("X-API-Key", "")
+
+
+def _key_from_browser_request(request: Request) -> str:
+    """Browser navigations can use the HttpOnly dashboard session cookie.
+
+    Machine-facing API routes deliberately do not accept this cookie, which
+    keeps a cross-site form or fetch from inheriting control authority.
+    """
+    return _key_from_headers(request) or request.cookies.get("rover_key", "")
+
+
+async def require_api_key(request: Request) -> None:
+    supplied = _key_from_headers(request)
+    # Only the read-only MJPEG feed accepts a query token. OpenCV's
+    # VideoCapture and browser <img> elements cannot set custom headers.
+    # Never accept query credentials on a state-changing route: CORS does not
+    # stop a malicious page from sending a simple no-cors POST.
+    if not supplied and request.method == "GET" and request.url.path == "/feed":
+        supplied = request.query_params.get("key", "")
+    if not _valid_api_key(supplied):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")
+
+
+# Every route below is protected by default (router-level dependency) so a new
+# endpoint can't ship open by forgetting a per-route Depends(). Only /, /sdk,
+# /static and the two WebSocket routes opt out below, each with its own
+# explicit check. /session is the header-authenticated dashboard login.
+router = APIRouter(dependencies=[Depends(require_api_key)])
 
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
@@ -179,7 +270,7 @@ async def latest_rover_data() -> dict:
     return await browser_service.data() or {}
 
 
-@app.get("/feed")
+@router.get("/feed")
 async def feed(view: str = "front", fps: int = 15):
     await need_start_mission()
     if not auth_response_data:
@@ -262,6 +353,12 @@ async def ws_ingest(websocket: WebSocket):
 
 @app.websocket("/ws/data")
 async def ws_data(websocket: WebSocket):
+    # Live telemetry (position, speed) for a real rover: gate it behind the
+    # same shared secret as everything else, as ?key= since browser WebSocket
+    # clients can't set custom headers.
+    if not _valid_api_key(websocket.query_params.get("key", "")):
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     queue = telemetry_hub.subscribe()
     try:
@@ -278,7 +375,7 @@ async def ws_data(websocket: WebSocket):
         telemetry_hub.unsubscribe(queue)
 
 
-@app.get("/status")
+@router.get("/status")
 async def get_status():
     video = {
         view: {
@@ -450,8 +547,8 @@ async def need_start_mission():
     )
 
 
-@app.post("/checkpoints-list")
-@app.get("/checkpoints-list")
+@router.post("/checkpoints-list")
+@router.get("/checkpoints-list")
 async def checkpoints():
     await need_start_mission()
     await get_checkpoints_list()
@@ -508,7 +605,7 @@ async def auth():
     )
 
 
-@app.post("/start-mission")
+@router.post("/start-mission")
 async def start_mission():
     required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG", "MISSION_SLUG"]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
@@ -532,7 +629,7 @@ async def start_mission():
     )
 
 
-@app.post("/end-mission")
+@router.post("/end-mission")
 async def end_mission():
     required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG", "MISSION_SLUG"]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
@@ -617,8 +714,77 @@ async def render_index_html(is_spectator: bool):
     return render_template("index.html", template_vars)
 
 
+_DASHBOARD_LOGIN_HTML = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Earth Rover SDK Login</title>
+  </head>
+  <body>
+    <main>
+      <h1>Earth Rover SDK</h1>
+      <p>Enter the ROVER_API_KEY configured for this server.</p>
+      <form id="login-form">
+        <label>API key <input id="api-key" type="password" autocomplete="current-password" required></label>
+        <button type="submit">Open dashboard</button>
+        <p id="login-error" role="alert"></p>
+      </form>
+    </main>
+    <script>
+      document.getElementById("login-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        var key = document.getElementById("api-key").value;
+        var response = await fetch("/session", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + key }
+        });
+        if (response.ok) location.replace("/");
+        else document.getElementById("login-error").textContent = "Invalid API key";
+      });
+    </script>
+  </body>
+</html>
+"""
+
+
+def _harden_browser_response(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _set_dashboard_cookie(response: Response, request: Request, key: str) -> None:
+    response.set_cookie(
+        "rover_key",
+        key,
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+        max_age=2592000,
+        path="/",
+    )
+
+
+@app.post("/session")
+async def create_dashboard_session(request: Request):
+    supplied_key = _key_from_headers(request)
+    if not _valid_api_key(supplied_key):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")
+    response = Response(status_code=204)
+    _set_dashboard_cookie(response, request, supplied_key)
+    return _harden_browser_response(response)
+
+
 @app.get("/")
 async def get_index(request: Request):
+    supplied_key = _key_from_browser_request(request)
+    if not _valid_api_key(supplied_key):
+        return _harden_browser_response(
+            HTMLResponse(content=_DASHBOARD_LOGIN_HTML, status_code=401)
+        )
+
     # The dashboard renders even when the mission hasn't started or auth
     # fails — it degrades to "waiting" states instead of a raw JSON error.
     boot_notice = ""
@@ -644,19 +810,29 @@ async def get_index(request: Request):
         "missionSlug": os.getenv("MISSION_SLUG", ""),
         "missionStarted": bool(auth_response_data) or not os.getenv("MISSION_SLUG"),
         "bootNotice": str(boot_notice).replace("\n", " "),
+        "apiKey": supplied_key,
     }
     template_vars = {
         "dashboard_config": json.dumps(dashboard_config).replace("</", "<\\/")
     }
-    return render_template("dashboard.html", template_vars)
+    response = render_template("dashboard.html", template_vars)
+    # The cookie only authenticates browser navigations. API requests still
+    # carry an explicit header, so cross-site requests cannot inherit control.
+    _set_dashboard_cookie(response, request, supplied_key)
+    return _harden_browser_response(response)
 
 
 @app.get("/sdk")
 async def sdk(request: Request):
-    return await render_index_html(is_spectator=False)
+    supplied_key = _key_from_browser_request(request)
+    if not _valid_api_key(supplied_key):
+        return _harden_browser_response(
+            HTMLResponse(content="<h1>Unauthorized</h1>", status_code=401)
+        )
+    return _harden_browser_response(await render_index_html(is_spectator=False))
 
 
-@app.post("/control-legacy")
+@router.post("/control-legacy")
 async def control_legacy(request: Request):
     await need_start_mission()
     if not auth_response_data:
@@ -875,7 +1051,7 @@ async def _control_watchdog(lamp, armed_at: float):
     await asyncio.shield(_ensure_confirmed_stop(lamp))
 
 
-@app.post("/control")
+@router.post("/control")
 async def control(request: Request):
     await need_start_mission()
     if not auth_response_data:
@@ -901,7 +1077,7 @@ async def control(request: Request):
         raise HTTPException(status_code=500, detail=detail) from e
 
 
-@app.post("/speak")
+@router.post("/speak")
 async def speak(request: Request):
     await need_start_mission()
     if not auth_response_data:
@@ -923,7 +1099,7 @@ async def speak(request: Request):
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}") from e
 
 
-@app.get("/screenshot")
+@router.get("/screenshot")
 async def get_screenshot(view_types: str = "rear,map,front"):
     await need_start_mission()
     if not auth_response_data:
@@ -962,7 +1138,7 @@ async def get_screenshot(view_types: str = "rear,map,front"):
     return JSONResponse(content=response_content)
 
 
-@app.get("/data")
+@router.get("/data")
 async def get_data():
     await need_start_mission()
     # Fast path: fresh telemetry pushed by the /sdk page, no page.evaluate.
@@ -986,7 +1162,7 @@ def _pending_checkpoint_sequences() -> list[int]:
     return [sequence for sequence in sequences if sequence > latest]
 
 
-@app.post("/checkpoint-reached")
+@router.post("/checkpoint-reached")
 async def checkpoint_reached(request: Request):
     global auth_response_data, checkpoints_list_data
     await need_start_mission()
@@ -1085,7 +1261,7 @@ async def checkpoint_reached(request: Request):
     )
 
 
-@app.get("/missions-history")
+@router.get("/missions-history")
 async def missions_history():
     auth_header = os.getenv("SDK_API_TOKEN")
     bot_slug = os.getenv("BOT_SLUG")
@@ -1113,7 +1289,7 @@ async def missions_history():
     return JSONResponse(content=response_data)
 
 
-@app.get("/missions")
+@router.get("/missions")
 async def missions():
     auth_header = os.getenv("SDK_API_TOKEN")
     bot_slug = os.getenv("BOT_SLUG")
@@ -1151,7 +1327,7 @@ async def missions():
     return JSONResponse(content={"missions": missions_list})
 
 
-@app.get("/v2/screenshot")
+@router.get("/v2/screenshot")
 async def get_screenshot_v2():
     await need_start_mission()
     if not auth_response_data:
@@ -1190,7 +1366,7 @@ async def get_screenshot_v2():
     return JSONResponse(content=response_data)
 
 
-@app.get("/v2/front")
+@router.get("/v2/front")
 async def get_front_frame():
     await need_start_mission()
     if not auth_response_data:
@@ -1205,7 +1381,7 @@ async def get_front_frame():
         raise HTTPException(status_code=404, detail="Front frame not available")
 
 
-@app.get("/v2/rear")
+@router.get("/v2/rear")
 async def get_rear_frame():
     await need_start_mission()
     if not auth_response_data:
@@ -1223,7 +1399,7 @@ async def get_rear_frame():
         raise HTTPException(status_code=404, detail="Rear frame not available")
 
 
-@app.post("/interventions/start")
+@router.post("/interventions/start")
 async def start_intervention(request: Request):
     await need_start_mission()
 
@@ -1275,7 +1451,7 @@ async def start_intervention(request: Request):
     )
 
 
-@app.post("/interventions/end")
+@router.post("/interventions/end")
 async def end_intervention(request: Request):
     await need_start_mission()
 
@@ -1324,7 +1500,7 @@ async def end_intervention(request: Request):
     )
 
 
-@app.get("/interventions/history")
+@router.get("/interventions/history")
 async def interventions_history():
     auth_header = os.getenv("SDK_API_TOKEN")
     bot_slug = os.getenv("BOT_SLUG")
@@ -1355,3 +1531,6 @@ async def interventions_history():
             detail="Failed to retrieve interventions history",
         )
     return JSONResponse(content=response_data)
+
+
+app.include_router(router)

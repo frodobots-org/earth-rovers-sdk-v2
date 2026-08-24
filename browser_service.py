@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
@@ -80,6 +81,18 @@ class BrowserService:
             await self._launch()
             return self._page
 
+    def _sdk_page_url(self) -> str:
+        """Drop legacy URL credentials before the browser navigates."""
+        parts = urlsplit(SDK_PAGE_URL)
+        query = urlencode(
+            [
+                (name, value)
+                for name, value in parse_qsl(parts.query, keep_blank_values=True)
+                if name != "key"
+            ]
+        )
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
     async def _launch(self):
         self._ready = False
         try:
@@ -130,12 +143,34 @@ class BrowserService:
                         " stream may need H.264: install Chrome or set"
                         " CHROME_EXECUTABLE_PATH to a codec-capable browser"
                     )
+            # Import here to avoid the main -> BrowserService import cycle.
+            # Scope the HttpOnly cookie to the SDK origin. A browser-wide
+            # Authorization header would leak the key to third-party requests
+            # made by the page (map tiles, RTC services, and similar).
+            import main as _main
+
             self._context = await self._browser.new_context(
                 viewport=self._viewport,
                 extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
             )
+            sdk_page_url = self._sdk_page_url()
+            sdk_origin = urlsplit(sdk_page_url)
+            if sdk_origin.scheme not in ("http", "https") or not sdk_origin.netloc:
+                raise RuntimeError("SDK_PAGE_URL must be an absolute http(s) URL")
+            await self._context.add_cookies(
+                [
+                    {
+                        "name": "rover_key",
+                        "value": _main.ROVER_API_KEY,
+                        "url": f"{sdk_origin.scheme}://{sdk_origin.netloc}",
+                        "httpOnly": True,
+                        "secure": sdk_origin.scheme == "https",
+                        "sameSite": "Strict",
+                    }
+                ]
+            )
             self._page = await self._context.new_page()
-            await self._page.goto(SDK_PAGE_URL, wait_until="domcontentloaded")
+            await self._page.goto(sdk_page_url, wait_until="domcontentloaded")
             await self._page.click("#join")
             # Control and telemetry must remain available when a camera is
             # offline. Wait for RTM readiness, not for a video DOM element.

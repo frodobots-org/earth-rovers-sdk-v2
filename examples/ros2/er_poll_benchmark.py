@@ -37,6 +37,7 @@ Dependencies: rclpy + requests (both present in the ros:humble image).
 
 import base64
 import csv
+import os
 import threading
 import time
 
@@ -107,7 +108,12 @@ class ErPollBenchmark(Node):
         self.declare_parameter("use_session", True)
         self.declare_parameter("http_timeout_s", 10.0)
         self.declare_parameter("csv_path", "")
+        self.declare_parameter("rover_api_key", os.environ.get("ROVER_API_KEY", ""))
 
+        self.rover_api_key = self.get_parameter("rover_api_key").value
+        self._auth_headers = (
+            {"Authorization": f"Bearer {self.rover_api_key}"} if self.rover_api_key else {}
+        )
         self.sdk_url = self.get_parameter("sdk_url").value.rstrip("/")
         self.mode = self.get_parameter("mode").value
         self.rate_hz = float(self.get_parameter("rate_hz").value)
@@ -172,6 +178,8 @@ class ErPollBenchmark(Node):
         endpoint = "/v2/front" if self.mode == "v2_front" else "/v2/screenshot"
         url = self.sdk_url + endpoint
         http = requests.Session() if self.use_session else requests
+        if self.use_session:
+            http.headers.update(self._auth_headers)
         interval = 1.0 / self.rate_hz
         deadline = time.monotonic()
         while self._running and rclpy.ok():
@@ -179,7 +187,11 @@ class ErPollBenchmark(Node):
             status, frame_timestamp = "exc", None
             elapsed = 0.0
             try:
-                response = http.get(url, timeout=self.http_timeout_s)
+                response = http.get(
+                    url,
+                    timeout=self.http_timeout_s,
+                    headers=None if self.use_session else self._auth_headers,
+                )
                 status = str(response.status_code)
                 elapsed = time.monotonic() - started
                 if response.status_code == 200:
@@ -230,7 +242,10 @@ class ErPollBenchmark(Node):
         while self._running and rclpy.ok():
             try:
                 with requests.get(
-                    url, stream=True, timeout=(5, self.http_timeout_s)
+                    url,
+                    stream=True,
+                    timeout=(5, self.http_timeout_s),
+                    headers=self._auth_headers,
                 ) as response:
                     if response.status_code != 200:
                         self.stats.record_error(str(response.status_code))

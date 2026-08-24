@@ -26,6 +26,7 @@ Dependencies (besides a ROS2 distro with rclpy + cv_bridge):
 
 import json
 import math
+import os
 import threading
 import time
 
@@ -82,7 +83,14 @@ class EarthRoverBridge(Node):
         self._cmd_lock = threading.Lock()
         self.create_subscription(Twist, "cmd_vel", self._on_cmd_vel, command_qos)
 
+        self.declare_parameter("rover_api_key", os.environ.get("ROVER_API_KEY", ""))
+        self.rover_api_key = self.get_parameter("rover_api_key").value
+
         self._session = requests.Session()
+        if self.rover_api_key:
+            self._session.headers.update(
+                {"Authorization": f"Bearer {self.rover_api_key}"}
+            )
         self._running = True
         self._stop_event = threading.Event()
         self._control_thread = threading.Thread(target=self._control_loop, daemon=True)
@@ -147,6 +155,10 @@ class EarthRoverBridge(Node):
 
     def _feed_loop(self):
         url = f"{self.sdk_url}/feed?view=front&fps={self.feed_fps}"
+        if self.rover_api_key:
+            # cv2.VideoCapture can't set custom headers, so the key rides
+            # along as a query param (the server accepts either for GET).
+            url += f"&key={self.rover_api_key}"
         while self._running and rclpy.ok():
             capture = cv2.VideoCapture(url)
             capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -172,6 +184,8 @@ class EarthRoverBridge(Node):
 
     def _telemetry_loop(self):
         ws_url = self.sdk_url.replace("http", "ws", 1) + "/ws/data"
+        if self.rover_api_key:
+            ws_url += f"?key={self.rover_api_key}"
         while self._running and rclpy.ok():
             ws = None
             try:

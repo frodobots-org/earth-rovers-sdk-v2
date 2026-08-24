@@ -17,6 +17,10 @@ import cv2
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_auth_headers
+
+HEADERS = rover_auth_headers()
+
 
 async def send_command_async(session: aiohttp.ClientSession,
                               linear: float, angular: float, lamp: int = 0):
@@ -134,7 +138,7 @@ async def concurrent_control_and_monitor():
 
     stop_event = asyncio.Event()
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Create background tasks
         telemetry_task = asyncio.create_task(
             telemetry_monitor(session, stop_event, interval=1.0)
@@ -162,7 +166,7 @@ async def parallel_data_fetch():
     """Fetch multiple data sources in parallel."""
     print("=== Parallel Data Fetch Demo ===\n")
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Fetch telemetry and frames in parallel
         telemetry_coro = get_telemetry_async(session)
         frames_coro = get_frames_async(session)
@@ -195,7 +199,7 @@ async def complex_maneuver():
     """Execute a complex maneuver with precise timing."""
     print("=== Complex Maneuver Demo ===\n")
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Execute multiple timed movements
         print("Executing complex maneuver...")
 

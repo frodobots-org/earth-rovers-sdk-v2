@@ -11,16 +11,19 @@ This example shows how to read and monitor rover telemetry data:
 - Motor RPMs
 """
 
-import requests
 import time
 import json
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_session
+
+SESSION = rover_session()
+
 
 def get_telemetry():
     """Fetch current telemetry data from the rover."""
-    response = requests.get(f"{BASE_URL}/data")
+    response = SESSION.get(f"{BASE_URL}/data")
     return response.json()
 
 

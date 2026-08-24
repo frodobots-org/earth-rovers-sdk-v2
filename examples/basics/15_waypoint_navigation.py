@@ -10,16 +10,19 @@ This example demonstrates GPS-based waypoint navigation:
 Note: Requires accurate GPS data from the rover.
 """
 
-import requests
 import time
 import math
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_session
+
+SESSION = rover_session()
+
 
 def send_command(linear: float, angular: float, lamp: int = 0):
     """Send movement command."""
-    requests.post(
+    SESSION.post(
         f"{BASE_URL}/control",
         json={"command": {"linear": linear, "angular": angular, "lamp": lamp}}
     )
@@ -32,7 +35,7 @@ def stop():
 
 def get_telemetry() -> dict:
     """Get current telemetry."""
-    response = requests.get(f"{BASE_URL}/data")
+    response = SESSION.get(f"{BASE_URL}/data")
     return response.json()
 
 

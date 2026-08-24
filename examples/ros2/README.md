@@ -58,15 +58,16 @@ host networking doesn't reach the host's `localhost`.)
 
 ```bash
 hypercorn main:app
-curl -X POST http://localhost:8000/start-mission   # if MISSION_SLUG is set
+curl -X POST http://localhost:8000/start-mission -H "Authorization: Bearer $ROVER_API_KEY"   # if MISSION_SLUG is set
 ```
 
-2. Run the bridge:
+2. Run the bridge (every request needs the server's `ROVER_API_KEY`; the bridge reads it from the environment or the `rover_api_key` ROS param):
 
 ```bash
+export ROVER_API_KEY="<the key printed by the server on startup, or set in its .env>"
 python3 earth_rover_bridge.py
 # SDK on another machine:
-python3 earth_rover_bridge.py --ros-args -p sdk_url:=http://192.168.1.50:8000
+python3 earth_rover_bridge.py --ros-args -p sdk_url:=http://192.168.1.50:8000 -p rover_api_key:=$ROVER_API_KEY
 ```
 
 3. Drive and watch:
@@ -83,7 +84,9 @@ ros2 topic echo /earth_rover/gps
 
 ```python
 import cv2
-cap = cv2.VideoCapture("http://localhost:8000/feed?view=front&fps=15")
+# cv2.VideoCapture can't set custom headers, so pass the key as ?key= (the
+# server accepts query authentication only on the read-only /feed endpoint).
+cap = cv2.VideoCapture("http://localhost:8000/feed?view=front&fps=15&key=YOUR_ROVER_API_KEY")
 while True:
     ok, frame = cap.read()
 ```

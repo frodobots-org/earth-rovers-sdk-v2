@@ -8,17 +8,20 @@ This example demonstrates the mission and checkpoint system:
 - Viewing mission history
 """
 
-import requests
 import time
 import json
 
 BASE_URL = "http://localhost:8000"
 
+from _client import rover_session
+
+SESSION = rover_session()
+
 
 def start_mission():
     """Start a new mission."""
     print("Starting mission...")
-    response = requests.post(f"{BASE_URL}/start-mission")
+    response = SESSION.post(f"{BASE_URL}/start-mission")
     result = response.json()
     print(f"  Response: {json.dumps(result, indent=2)}")
     return result
@@ -27,7 +30,7 @@ def start_mission():
 def end_mission():
     """End the current mission."""
     print("Ending mission...")
-    response = requests.post(f"{BASE_URL}/end-mission")
+    response = SESSION.post(f"{BASE_URL}/end-mission")
     result = response.json()
     print(f"  Response: {json.dumps(result, indent=2)}")
     return result
@@ -36,7 +39,7 @@ def end_mission():
 def get_checkpoints():
     """Get the list of checkpoints for the current mission."""
     print("Fetching checkpoints...")
-    response = requests.get(f"{BASE_URL}/checkpoints-list")
+    response = SESSION.get(f"{BASE_URL}/checkpoints-list")
     result = response.json()
     if isinstance(result, dict) and "checkpoints_list" in result:
         return result.get("checkpoints_list", []), result.get("latest_scanned_checkpoint")
@@ -80,7 +83,7 @@ def _to_float(value, default=0.0):
 def mark_checkpoint_reached():
     """Mark the current checkpoint as reached."""
     print("Marking checkpoint as reached...")
-    response = requests.post(f"{BASE_URL}/checkpoint-reached")
+    response = SESSION.post(f"{BASE_URL}/checkpoint-reached")
     result = response.json()
     print(f"  Response: {json.dumps(result, indent=2)}")
     return result
@@ -89,7 +92,7 @@ def mark_checkpoint_reached():
 def get_mission_history():
     """Get the history of past missions."""
     print("Fetching mission history...")
-    response = requests.get(f"{BASE_URL}/missions-history")
+    response = SESSION.get(f"{BASE_URL}/missions-history")
     result = response.json()
     return result
 
@@ -117,7 +120,7 @@ def display_mission_history(history: list):
 
 def send_command(linear: float, angular: float):
     """Send movement command."""
-    requests.post(
+    SESSION.post(
         f"{BASE_URL}/control",
         json={"command": {"linear": linear, "angular": angular, "lamp": 0}}
     )
@@ -133,7 +136,7 @@ def navigate_to_checkpoint(checkpoint: dict):
     print(f"\nNavigating to checkpoint: {checkpoint.get('name', 'Unknown')}")
 
     # Get current position
-    response = requests.get(f"{BASE_URL}/data")
+    response = SESSION.get(f"{BASE_URL}/data")
     data = response.json()
     current_lat = _to_float(data.get("latitude", data.get("lat", 0)))
     current_lon = _to_float(data.get("longitude", data.get("lon", 0)))

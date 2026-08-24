@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+<!--
+  Cross-origin: this page calls the SDK server directly, so it needs
+  ALLOWED_ORIGINS set on the server to this page's serving origin. Serve it
+  with a local static server (e.g. `python3 -m http.server 5500` from this
+  directory) rather than opening the file directly -- browsers send
+  `Origin: null` for file:// pages, which CORS allowlists can't reliably match.
+-->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -156,6 +163,7 @@
 
     <div class="controls">
       <input id="url" value="http://localhost:8000" title="SDK base URL" />
+      <input id="key" value="" placeholder="ROVER_API_KEY" title="Shared API key (Authorization: Bearer ...)" />
       <select id="endpoint">
         <option value="/v2/front" selected>/v2/front</option>
         <option value="/v2/screenshot">/v2/screenshot</option>
@@ -238,6 +246,9 @@
     <script>
       const $ = (id) => document.getElementById(id);
       const SLOW_MS = 250, TICKS = 120, SPARK = 300;
+      // Shared API key gate. State-changing requests always use a header;
+      // query-string credentials are reserved for the read-only MJPEG feed.
+      const authHeaders = () => ($("key").value ? { Authorization: "Bearer " + $("key").value } : {});
 
       let running = false;
       let samples = [], history = [], lastTs = null, startedAt = 0;
@@ -327,7 +338,7 @@
       async function poll(base, endpoint) {
         const started = performance.now();
         try {
-          const res = await fetch(base + endpoint, { cache: "no-store" });
+          const res = await fetch(base + endpoint, { cache: "no-store", headers: authHeaders() });
           if (!running) return; // stopped while this poll was in flight
           const ms = performance.now() - started;
           if (!res.ok) {
@@ -426,7 +437,7 @@
           feedPrev = null;
           try {
             const res = await fetch(`${base}/feed?view=front&fps=${fps}`, {
-              signal: feedAbort.signal, cache: "no-store",
+              signal: feedAbort.signal, cache: "no-store", headers: authHeaders(),
             });
             if (!res.ok) throw new Error("HTTP " + res.status);
             $("dot").className = "dot live";
@@ -515,7 +526,7 @@
         try {
           const res = await fetch($("url").value.replace(/\/+$/, "") + "/control", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
             body: JSON.stringify({ command }),
           });
           const ms = performance.now() - started;
@@ -581,12 +592,12 @@
       });
       // Never leave the last motion command active if the page goes away.
       window.addEventListener("pagehide", () => {
-        navigator.sendBeacon(
-          $("url").value.replace(/\/+$/, "") + "/control",
-          new Blob([JSON.stringify({ command: { linear: 0, angular: 0 } })], {
-            type: "application/json",
-          })
-        );
+        fetch($("url").value.replace(/\/+$/, "") + "/control", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+          body: JSON.stringify({ command: { linear: 0, angular: 0 } }),
+          keepalive: true,
+        }).catch(() => {});
       });
 
       // ---- server-side pipeline health via /status ------------------------
@@ -596,7 +607,7 @@
       let statusTimer = null, lastStatusSample = null;
       async function pollStatus() {
         try {
-          const res = await fetch($("url").value.replace(/\/+$/, "") + "/status");
+          const res = await fetch($("url").value.replace(/\/+$/, "") + "/status", { headers: authHeaders() });
           const s = await res.json();
           if (!s.video) {
             $("srv-stats").textContent =

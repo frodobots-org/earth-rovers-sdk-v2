@@ -11,14 +11,17 @@ Usage:
 
 import sys
 import time
-import requests
 
 BASE_URL = "http://localhost:8000"
+
+from _client import rover_session
+
+SESSION = rover_session()
 
 
 def speak(text: str) -> dict:
     """Send text to the rover's speaker via TTS."""
-    response = requests.post(f"{BASE_URL}/speak", json={"text": text})
+    response = SESSION.post(f"{BASE_URL}/speak", json={"text": text})
     response.raise_for_status()
     return response.json()
 

@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+<!--
+  Cross-origin: this page calls the SDK server directly, so it needs
+  ALLOWED_ORIGINS set on the server to this page's serving origin. Serve it
+  with a local static server (e.g. `python3 -m http.server 5500` from this
+  directory) rather than opening the file directly -- browsers send
+  `Origin: null` for file:// pages, which CORS allowlists can't reliably match.
+-->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -24,11 +31,14 @@
     <img id="rearFrame" class="frame" alt="Rear View" />
 
     <script>
+      const ROVER_API_KEY = ""; // paste your ROVER_API_KEY here
       const rearFrame = document.getElementById("rearFrame");
 
       const fetchRearFrame = async () => {
         try {
-          const response = await fetch("http://localhost:8000/v2/rear");
+          const response = await fetch("http://localhost:8000/v2/rear", {
+            headers: { Authorization: "Bearer " + ROVER_API_KEY },
+          });
           const data = await response.json();
           rearFrame.src = `data:image/png;base64,${data.rear_frame}`;
         } catch (error) {

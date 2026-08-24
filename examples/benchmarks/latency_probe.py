@@ -21,11 +21,15 @@ Usage:
 
 import argparse
 import csv
+import os
 import signal
 import sys
 import time
 
 import requests
+
+ROVER_API_KEY = os.environ.get("ROVER_API_KEY", "")
+AUTH_HEADERS = {"Authorization": f"Bearer {ROVER_API_KEY}"} if ROVER_API_KEY else {}
 
 SUMMARY_INTERVAL_S = 30.0
 
@@ -89,13 +93,19 @@ def poll_v2(args, stats: Stats, writer):
     frame_key = "front_frame"
     url = args.sdk_url.rstrip("/") + endpoint
     session = requests.Session() if args.session else requests
+    if args.session:
+        session.headers.update(AUTH_HEADERS)
     interval = 1.0 / args.rate
     deadline = time.monotonic()
     while True:
         started = time.monotonic()
         status, frame_timestamp = "exc", None
         try:
-            response = session.get(url, timeout=args.timeout)
+            response = session.get(
+                url,
+                timeout=args.timeout,
+                headers=None if args.session else AUTH_HEADERS,
+            )
             status = str(response.status_code)
             elapsed = time.monotonic() - started
             if response.status_code == 200:
@@ -145,7 +155,9 @@ def stream_feed(args, stats: Stats, writer):
     boundary = b"--frame"
     while True:
         try:
-            with requests.get(url, stream=True, timeout=(5, args.timeout)) as response:
+            with requests.get(
+                url, stream=True, timeout=(5, args.timeout), headers=AUTH_HEADERS
+            ) as response:
                 if response.status_code != 200:
                     stats.record_error(str(response.status_code))
                     print(f"/feed HTTP {response.status_code}: {response.text[:120]}")

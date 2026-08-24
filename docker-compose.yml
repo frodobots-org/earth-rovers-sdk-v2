@@ -5,10 +5,18 @@ services:
       - DEBUG=true
       - BOT_SLUG=yout-bot-name
       - SDK_API_TOKEN=y0ur4p1tok3n
+      # Required: this port is published to the host (and reachable over the
+      # LAN), so every API call needs this shared secret. Set it explicitly —
+      # an auto-generated key would change on every container restart. The
+      # server refuses to start if this placeholder is still in place.
+      - ROVER_API_KEY=change-me-to-a-long-random-value
+      # Listen on the container interface so Docker can forward the port. The
+      # host-side mapping below remains loopback-only by default.
+      - ROVER_BIND_HOST=0.0.0.0
       - MAP_ZOOM_LEVEL=18
       - IMAGE_FORMAT=jpeg
       - IMAGE_QUALITY=0.8
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./screenshots:/app/screenshots
