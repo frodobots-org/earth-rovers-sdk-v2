@@ -912,8 +912,12 @@ async def speak(request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="Text not provided")
 
+    audio_path = None
     try:
-        audio_path = await generate_speech(text, "static/tts_output")
+        output_path = os.path.join(
+            "static", f"tts_output_{secrets.token_urlsafe(12)}"
+        )
+        audio_path = await generate_speech(text, output_path)
         audio_filename = os.path.basename(audio_path)
         audio_url = f"http://127.0.0.1:8000/static/{audio_filename}"
         await browser_service.speak(audio_url)
@@ -921,6 +925,18 @@ async def speak(request: Request):
     except Exception as e:
         logger.error("Error in /speak: %s", str(e))
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}") from e
+    finally:
+        if audio_path:
+            try:
+                os.remove(audio_path)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                logger.warning(
+                    "Failed to remove generated TTS audio %s: %s",
+                    audio_path,
+                    error,
+                )
 
 
 @app.get("/screenshot")
