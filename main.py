@@ -927,8 +927,16 @@ async def speak(request: Request):
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}") from e
     finally:
         if audio_path:
-            with contextlib.suppress(FileNotFoundError):
+            try:
                 os.remove(audio_path)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                logger.warning(
+                    "Failed to remove generated TTS audio %s: %s",
+                    audio_path,
+                    error,
+                )
 
 
 @app.get("/screenshot")

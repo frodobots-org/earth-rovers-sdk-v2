@@ -1,7 +1,7 @@
 import asyncio
 import os
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import main
 
@@ -92,6 +92,55 @@ class SpeakEndpointTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.exception.status_code, 500)
         remove.assert_called_once_with(audio_path)
+
+    async def test_cleanup_failure_does_not_change_successful_response(self):
+        audio_path = os.path.join("static", "tts_output_locked.mp3")
+        with (
+            patch.dict(os.environ, {"MISSION_SLUG": ""}),
+            patch.object(
+                main, "generate_speech", AsyncMock(return_value=audio_path)
+            ),
+            patch.object(main.browser_service, "speak", AsyncMock()),
+            patch.object(
+                main.os,
+                "remove",
+                side_effect=PermissionError("file is still in use"),
+            ) as remove,
+            patch.object(main.logger, "warning") as warning,
+        ):
+            response = await main.speak(self._request("hello"))
+
+        self.assertEqual(response, {"message": "Speech sent to rover"})
+        remove.assert_called_once_with(audio_path)
+        warning.assert_called_once_with(
+            "Failed to remove generated TTS audio %s: %s",
+            audio_path,
+            ANY,
+        )
+
+    async def test_cleanup_failure_does_not_mask_playback_error(self):
+        audio_path = os.path.join("static", "tts_output_locked.mp3")
+        with (
+            patch.dict(os.environ, {"MISSION_SLUG": ""}),
+            patch.object(
+                main, "generate_speech", AsyncMock(return_value=audio_path)
+            ),
+            patch.object(
+                main.browser_service,
+                "speak",
+                AsyncMock(side_effect=RuntimeError("playback failed")),
+            ),
+            patch.object(
+                main.os,
+                "remove",
+                side_effect=PermissionError("file is still in use"),
+            ),
+        ):
+            with self.assertRaises(main.HTTPException) as context:
+                await main.speak(self._request("hello"))
+
+        self.assertEqual(context.exception.status_code, 500)
+        self.assertEqual(context.exception.detail, "TTS failed: playback failed")
 
 
 if __name__ == "__main__":
