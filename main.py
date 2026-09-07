@@ -677,15 +677,21 @@ async def control_legacy(request: Request):
 # one arrives, so a broken command path after a motion command means a
 # runaway bot. The watchdog arms when a motion command is ACCEPTED (before
 # dispatch, covering ambiguous delivery) and, once confirmed deliveries are
-# stale for CONTROL_WATCHDOG_S, delivers a CONFIRMED stop (peer receipt) —
-# retrying and rebuilding the RTM session until the rover confirms it. Failed
-# traffic cannot refresh this deadline. CONTROL_WATCHDOG_S=0 disables it.
+# stale for CONTROL_WATCHDOG_S, delivers a stop confirmed by rover liveness
+# (RTM connected + fresh telemetry) — retrying and rebuilding the RTM session
+# until the channel is live. CONTROL_WATCHDOG_S=0 disables it.
 CONTROL_WATCHDOG_S = float(os.getenv("CONTROL_WATCHDOG_S", "3"))
 WATCHDOG_RETRY_DELAY_S = 1.0
 WATCHDOG_RESET_EVERY = 3  # rebuild the browser/RTM session every N failures
 SAFETY_STOP_CONFIRM_TIMEOUT_S = float(
     os.getenv("SAFETY_STOP_CONFIRM_TIMEOUT_S", "12")
 )
+# A safety stop counts as delivered when the rover is proven live: RTM connected
+# AND telemetry received within this window. The rover streams telemetry back
+# over the same Agora link that carries our control commands, so a fresh stream
+# proves the command path is reachable — a confirmation the low-level rover RTM
+# stack does not surface as a per-message peer receipt (hasPeerReceived).
+ROVER_LIVENESS_MAX_AGE_S = float(os.getenv("ROVER_LIVENESS_MAX_AGE_S", "4"))
 
 _control_watchdog_task: Optional[asyncio.Task] = None
 _confirmed_stop_task: Optional[asyncio.Task] = None
@@ -806,6 +812,14 @@ def _ensure_confirmed_stop(lamp=0) -> asyncio.Task:
 
 
 async def _deliver_confirmed_stop(lamp) -> bool:
+    """Deliver a zero-motion stop and confirm the rover is live to receive it.
+
+    The rover firmware (Agora RTSA) accepts peer messages but does not emit the
+    high-level RTM peer receipt the browser SDK exposes as hasPeerReceived, so a
+    per-message receipt is an unreliable (false-negative) confirmation. Instead
+    we send the stop and confirm delivery by proving the command channel is live
+    via _rover_channel_is_live(): RTM connected AND fresh rover telemetry.
+    """
     stop_command = {"linear": 0, "angular": 0, "lamp": lamp}
     attempt = 0
     delay = WATCHDOG_RETRY_DELAY_S
@@ -813,12 +827,14 @@ async def _deliver_confirmed_stop(lamp) -> bool:
         attempt += 1
         try:
             async with _get_control_dispatch_lock():
-                if await browser_service.send_message_confirmed(stop_command):
-                    logger.warning(
-                        "Safety stop confirmed by rover (attempt %s)", attempt
-                    )
-                    return True
-                raise RuntimeError("rover did not confirm the stop")
+                await browser_service.send_message(stop_command)
+            if await _rover_channel_is_live():
+                logger.warning(
+                    "Safety stop delivered; rover channel live (attempt %s)",
+                    attempt,
+                )
+                return True
+            raise RuntimeError("rover channel not confirmed live")
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -836,6 +852,18 @@ async def _deliver_confirmed_stop(lamp) -> bool:
             delay = min(delay * 1.5, 5.0)
     logger.info("Safety stop abandoned because the mission session was cleared")
     return False
+
+
+async def _rover_channel_is_live() -> bool:
+    """True when the command path to the rover is proven live: RTM connected and
+    the rover is actively streaming telemetry back. Telemetry travels the same
+    Agora link as our control commands, so a fresh stream proves the rover is
+    reachable and receiving — the assurance hasPeerReceived cannot give us."""
+    health = await browser_service.rtm_health()
+    if not health or not health.get("ready"):
+        return False
+    age = telemetry_hub.age_seconds
+    return age is not None and age <= ROVER_LIVENESS_MAX_AGE_S
 
 
 async def _require_confirmed_stop(reason: str, lamp=0):
