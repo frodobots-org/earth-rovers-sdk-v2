@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Literal, Optional
 
+from arena_cameras import ArenaCameras
 from browser_service import FEED_QUALITY, FORMAT, QUALITY, BrowserService
 from rtm_client import RtmClient
 from telemetry_hub import TelemetryHub
@@ -81,10 +82,19 @@ FRODOBOTS_API_URL = os.getenv(
 # transient capture blip — better a fast 404/503 than a multi-second stall.
 V2_FRAME_TIMEOUT_S = float(os.getenv("V2_FRAME_TIMEOUT_S", "2"))
 
+# Arena captures are not backed by the warm frame loop the rover feed uses, so
+# they pay a full page round trip - measured at ~30 ms, well inside this. The
+# budget covers capture only; page warm-up is reported separately, because a
+# timeout is the wrong answer for "the browser is still starting".
+ARENA_FRAME_TIMEOUT_S = float(os.getenv("ARENA_FRAME_TIMEOUT_S", "5"))
+
 
 # In-memory storage for the response
 auth_response_data = {}
 checkpoints_list_data = {}
+# Arena ceiling cameras. Held apart from auth_response_data so a venue outage
+# can never interfere with rover auth.
+arena_auth_data = {}
 auth_lock = None
 auth_lock_loop = None
 INGEST_TOKEN = secrets.token_urlsafe(32)
@@ -440,6 +450,42 @@ async def retrieve_tokens(headers, bot_slug):
     return response_data
 
 
+async def retrieve_arena_tokens():
+    """Credentials for the arena ceiling cameras, or None if unavailable.
+
+    Returns None instead of raising on every failure path: the arena is
+    optional venue infrastructure, and a rover mission must still start when
+    the cameras are down or the backend predates this endpoint.
+    """
+    auth_header = os.getenv("SDK_API_TOKEN")
+    if not auth_header:
+        return None
+
+    try:
+        status, response_data = await external_request(
+            "GET",
+            FRODOBOTS_API_URL + "/arena/token",
+            headers={"Authorization": f"Bearer {auth_header}"},
+        )
+    except Exception as e:  # noqa: BLE001 - never block the rover path
+        logger.warning("Arena credentials unavailable: %s", e)
+        return None
+
+    if status != 200:
+        logger.warning("Arena credentials unavailable: backend returned %s", status)
+        return None
+    return response_data
+
+
+async def arena_auth(refresh: bool = False) -> ArenaCameras:
+    global arena_auth_data
+    if refresh or not arena_auth_data:
+        fetched = await retrieve_arena_tokens()
+        if fetched:
+            arena_auth_data = fetched
+    return ArenaCameras(arena_auth_data)
+
+
 async def need_start_mission():
     if not os.getenv("MISSION_SLUG"):
         return
@@ -613,6 +659,19 @@ async def render_index_html(is_spectator: bool):
         ).replace("</", "<\\/"),
         "map_zoom_level": int(os.getenv("MAP_ZOOM_LEVEL", "18")),
     }
+
+    # The arena is optional: when its credentials are missing these render
+    # empty and arenaCameras.js skips its join, leaving the rover feed intact.
+    arena = await arena_auth()
+    template_vars.update(
+        {
+            "arena_appid": html.escape(arena.app_id, quote=True),
+            "arena_rtc_token": html.escape(arena.rtc_token, quote=True),
+            "arena_channel": html.escape(arena.channel_name, quote=True),
+            "arena_uid": html.escape(arena.viewer_uid, quote=True),
+            "arena_cameras": html.escape(json.dumps(arena.cameras), quote=True),
+        }
+    )
 
     return render_template("index.html", template_vars)
 
@@ -960,6 +1019,132 @@ async def get_screenshot(view_types: str = "rear,map,front"):
     response_content["timestamp"] = time.time()
 
     return JSONResponse(content=response_content)
+
+
+@app.get("/arena/token")
+async def get_arena_token():
+    """Arena credentials, for the page's token renewal and for debugging.
+
+    Served from the SDK's own origin so arenaCameras.js can renew without
+    holding the backend's SDK key in the browser.
+    """
+    arena = await arena_auth(refresh=True)
+    if not arena.configured:
+        raise HTTPException(status_code=503, detail="Arena cameras are not configured")
+    return JSONResponse(content=arena_auth_data)
+
+
+@app.get("/missions/offroad/cameras")
+async def get_offroad_cameras():
+    """Which ceiling cameras this SDK is actually receiving right now."""
+    arena = await arena_auth()
+    if not arena.configured:
+        raise HTTPException(status_code=503, detail="Arena cameras are not configured")
+
+    # Answer immediately rather than blocking on a browser launch that cannot
+    # succeed yet: with MISSION_SLUG set, the /sdk page - and so the arena
+    # client - only exists once a mission has started.
+    if not browser_service.is_ready:
+        return JSONResponse(
+            content={
+                "channel": arena.channel_name,
+                "joined": False,
+                "error": "SDK video page is still starting; retry in a few seconds",
+                "cameras": [
+                    {"cam": cam, "uid": uid, "online": False}
+                    for cam, uid in sorted(arena.cameras.items())
+                ],
+                "unmapped_uids": [],
+            }
+        )
+
+    status = await browser_service.arena_status()
+    return JSONResponse(
+        content={
+            "channel": arena.channel_name,
+            "joined": bool(status.get("joined")),
+            "error": status.get("error"),
+            "cameras": status.get("cameras", []),
+            "unmapped_uids": status.get("unmapped_uids", []),
+        }
+    )
+
+
+@app.get("/missions/offroad/screenshot")
+async def get_offroad_screenshot(cam: str = "all"):
+    """Latest frame from the arena ceiling cameras.
+
+    ?cam=1 for one camera, ?cam=1,3 for several, ?cam=all for every camera the
+    backend knows about. Frames are captured concurrently, so asking for all of
+    them costs about the same as asking for one.
+    """
+    arena = await arena_auth()
+    if not arena.configured:
+        raise HTTPException(status_code=503, detail="Arena cameras are not configured")
+
+    try:
+        requested = arena.resolve(cam)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+    if not browser_service.is_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="SDK video page is still starting; retry in a few seconds",
+        )
+
+    async def capture(cam_number: int, uid: int):
+        try:
+            packet = await asyncio.wait_for(
+                browser_service.arena_frame(uid), timeout=ARENA_FRAME_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            return cam_number, None, f"camera {cam_number} capture timed out"
+        except Exception as e:  # noqa: BLE001
+            # A browser fault must not surface as an unhandled 500 to a model
+            # polling this endpoint; it becomes this camera's error instead.
+            return cam_number, None, f"camera {cam_number}: {str(e).splitlines()[0]}"
+        if packet and packet.get("error"):
+            return cam_number, None, packet["error"]
+        if not packet or not packet.get("data_url"):
+            return cam_number, None, None
+        return cam_number, packet, None
+
+    results = await asyncio.gather(
+        *(capture(cam_number, uid) for cam_number, uid in requested)
+    )
+
+    response_data = {}
+    errors = {}
+    for cam_number, packet, error in results:
+        if error:
+            errors[str(cam_number)] = error
+            continue
+        if not packet:
+            continue
+        response_data[f"cam_{cam_number}_frame"] = packet["data_url"]
+        response_data[f"cam_{cam_number}_timestamp"] = packet["timestamp"]
+
+    if not response_data:
+        # Nothing came back. A decode error is the SDK's problem (503); an
+        # absent publisher is simply a camera that is not switched on (404).
+        if errors:
+            raise HTTPException(status_code=503, detail="; ".join(errors.values()))
+        wanted = ", ".join(str(cam_number) for cam_number, _ in requested)
+        raise HTTPException(
+            status_code=404, detail=f"No frames available for camera(s): {wanted}"
+        )
+
+    timestamps = [
+        value for key, value in response_data.items() if key.endswith("_timestamp")
+    ]
+    response_data["timestamp"] = max(timestamps)
+    if errors:
+        # Partial success stays a 200: five good cameras should not be lost
+        # because the sixth is dark.
+        response_data["errors"] = errors
+
+    return JSONResponse(content=response_data)
 
 
 @app.get("/data")

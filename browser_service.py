@@ -314,6 +314,33 @@ class BrowserService:
             )
         )
 
+    async def arena_frame(self, uid: int) -> dict:
+        """Latest frame from one arena ceiling camera, by publisher UID.
+
+        Served by the second Agora client on the page (static/arenaCameras.js),
+        which is a different Agora project from the rover feed above.
+        """
+        return await self._run(
+            lambda page: page.evaluate(
+                "([uid, format, quality]) => getArenaFramePacket(uid, format, quality)",
+                [int(uid), FORMAT, QUALITY],
+            )
+        )
+
+    async def arena_status(self) -> dict:
+        """Which arena cameras the page is actually receiving.
+
+        Never raises: an arena that failed to join must not make a rover
+        status call look broken.
+        """
+        try:
+            return await self._run(
+                lambda page: page.evaluate("() => arenaStatus()"),
+                retry_on_disconnect=False,
+            )
+        except Exception as e:  # noqa: BLE001 - status must always answer
+            return {"joined": False, "error": str(e).split("\n", 1)[0], "cameras": []}
+
     async def configured_frame(self, view: str) -> dict:
         uid = 1000 if view == "front" else 1001
         return await self._run(

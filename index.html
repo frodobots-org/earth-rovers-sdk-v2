@@ -171,6 +171,13 @@
             />
             <input id="bot_uid" type="hidden" value="{{ bot_uid }}" />
             <input id="ingest_token" type="hidden" value="{{ ingest_token }}" />
+            <!-- Arena ceiling cameras: a second Agora project, so a second
+                 client (static/arenaCameras.js) joins with these. -->
+            <input id="arena_appid" type="hidden" value="{{ arena_appid }}" />
+            <input id="arena_rtc_token" type="hidden" value="{{ arena_rtc_token }}" />
+            <input id="arena_channel" type="hidden" value="{{ arena_channel }}" />
+            <input id="arena_uid" type="hidden" value="{{ arena_uid }}" />
+            <input id="arena_cameras" type="hidden" value="{{ arena_cameras }}" />
           </div>
         </div>
 
@@ -328,6 +335,11 @@
             id="captured-frames"
             style="display: flex; flex-wrap: wrap"
           ></div>
+          <!-- Arena ceiling cameras render here so their frames decode. -->
+          <div
+            id="arena-playerlist"
+            style="display: flex; flex-wrap: wrap"
+          ></div>
         </div>
         <div id="map"></div>
       </div>
@@ -342,6 +354,7 @@
     <script src="/static/bootstrap.bundle.min.js"></script>
     <script src="/static/AgoraRTC_N-4.24.2.js"></script>
     <script src="/static/basicVideoCall.js"></script>
+    <script src="/static/arenaCameras.js" defer></script>
     <script src="/static/agora-rtm-sdk-1.6.0.js"></script>
     <script src="/static/basicRtm.js" defer></script>
     <script src="/static/sdk-push.js" defer></script>
