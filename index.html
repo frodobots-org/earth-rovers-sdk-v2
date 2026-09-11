@@ -328,6 +328,11 @@
             id="captured-frames"
             style="display: flex; flex-wrap: wrap"
           ></div>
+          <!-- Arena ceiling cameras render here so their frames decode. -->
+          <div
+            id="arena-playerlist"
+            style="display: flex; flex-wrap: wrap"
+          ></div>
         </div>
         <div id="map"></div>
       </div>
@@ -342,6 +347,7 @@
     <script src="/static/bootstrap.bundle.min.js"></script>
     <script src="/static/AgoraRTC_N-4.24.2.js"></script>
     <script src="/static/basicVideoCall.js"></script>
+    <script src="/static/arenaCameras.js" defer></script>
     <script src="/static/agora-rtm-sdk-1.6.0.js"></script>
     <script src="/static/basicRtm.js" defer></script>
     <script src="/static/sdk-push.js" defer></script>

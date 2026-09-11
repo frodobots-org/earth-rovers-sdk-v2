@@ -276,6 +276,62 @@ Example Response:
 }
 ```
 
+### GET /missions/offroad/screenshot
+
+Latest frame from the arena ceiling cameras above the offroad course. These are venue cameras, not rover cameras: they are mounted above the track and mostly used by AI models to see the whole course at once.
+
+They stream through a **separate Agora project** owned by the venue, so the SDK joins them with a second Agora client and credentials fetched from the backend (`/api/v1/arena/token`). No extra configuration is needed here — the existing `SDK_API_TOKEN` is used, and the camera-number-to-UID map comes from the backend, so cameras can be renumbered without touching the SDK.
+
+Ask for one camera, several, or all of them. Frames are captured concurrently, so `cam=all` costs about the same as `cam=1`.
+
+```bash
+curl --location 'http://localhost:8000/missions/offroad/screenshot?cam=1'
+curl --location 'http://localhost:8000/missions/offroad/screenshot?cam=1,3'
+curl --location 'http://localhost:8000/missions/offroad/screenshot?cam=all'
+```
+
+Example Response:
+
+```JSON
+{
+    "cam_1_frame": "data:image/jpeg;base64,...",
+    "cam_1_timestamp": 1724189733.198559,
+    "cam_2_frame": "data:image/jpeg;base64,...",
+    "cam_2_timestamp": 1724189733.208559,
+    "timestamp": 1724189733.208559
+}
+```
+
+A camera that is not switched on is simply absent from the response. If some cameras answer and others fail, the response stays `200` and lists the failures under `errors`, so one dark camera never costs you the rest. If none answer: `404` when no camera is publishing, `503` when frames exist but cannot be decoded, and `503` when the arena credentials are unavailable altogether.
+
+The arena is entirely optional. Its credentials are fetched after the rover page loads, so an arena outage cannot delay rover control or telemetry startup. Failed arena joins and renewals retry independently with backoff. Expired credentials are refreshed before reuse; a failed renewal returns 503 instead of an old token.
+
+### GET /missions/offroad/cameras
+
+Which ceiling cameras this SDK is actually receiving right now. Useful before a match to tell "all six are up" from "two are up and four are dead".
+
+```bash
+curl --location 'http://localhost:8000/missions/offroad/cameras'
+```
+
+Example Response:
+
+```JSON
+{
+    "channel": "offroad_cam_1",
+    "joined": true,
+    "error": null,
+    "cameras": [
+        { "cam": 1, "uid": 1001, "online": true },
+        { "cam": 2, "uid": 1002, "online": true },
+        { "cam": 3, "uid": 1003, "online": false }
+    ],
+    "unmapped_uids": []
+}
+```
+
+`unmapped_uids` lists publishers in the channel that the backend's map doesn't know about, so a stray publisher is never mistaken for a camera.
+
 ### GET /v2/front
 
 This endpoint allows you to retrieve the latest frame emitted from the bot's front camera. The frame is provided as a base64 encoded image.
