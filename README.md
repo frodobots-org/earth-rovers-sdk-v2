@@ -143,6 +143,12 @@ With this endpoint you can send linear and angular values to move the bot, and c
 >
 > **Dead-man watchdog (v6.1)**: the watchdog arms when a motion command is accepted (even if delivery is uncertain), then follows Agora's confirmed-delivery timestamp rather than raw incoming requests. If no command is confirmed within `CONTROL_WATCHDOG_S` seconds (default **3**), the SDK sends a stop and keeps retrying — rebuilding the browser/RTM session if needed — until the rover **confirms receipt**. Failed retry traffic therefore cannot suppress the deadline. This protects against controller crashes and command-path drops mid-drive; it cannot help if the **rover itself** loses connectivity (that requires a firmware-side failsafe). Streaming clients should set `CONTROL_WATCHDOG_S=0.5`–`1`; `0` disables it.
 
+> **Safety-stop confirmation**: `SAFETY_STOP_CONFIRMATION=peer_receipt` is the default. Safety sends await the RTM send result and require an explicit peer receipt; pending, rejected, or malformed send results never permit mission teardown. RTSA firmware that does not emit receipts will keep returning 503 while stop recovery continues.
+>
+> Deployments with verified wheel feedback can explicitly select `SAFETY_STOP_CONFIRMATION=wheel_telemetry`. When the transport accepts a stop without a peer receipt, this mode requires new zero-RPM readings from all four wheels spanning at least 0.25 seconds, received after transport completion. The documented `rpms` samples must have four numeric RPMs followed by a Unix-seconds timestamp, with the rover and SDK clocks synchronized. Old, future-dated, missing, malformed, or moving-wheel samples cannot confirm a stop; scalar `speed: 0` cannot rule out rotation. This fallback observes stationary wheels **but does not acknowledge the firmware's latched command** (for example, stalled wheels may read zero). Validate the firmware before enabling it; a firmware command acknowledgement remains the stronger solution.
+>
+> `GET /status` distinguishes transport failures (`rtm.failed`), explicit peer receipts (`rtm.delivered`), and transport-accepted sends without receipts (`rtm.unconfirmed`). The watchdog deadline still follows explicit receipts; an unconfirmed control stream does not extend it. `ROVER_LIVENESS_MAX_AGE_S` is not used: telemetry freshness alone never confirms a safety stop.
+
 ```bash
 curl --location 'http://localhost:8000/control' \
 --header 'Content-Type: application/json' \
