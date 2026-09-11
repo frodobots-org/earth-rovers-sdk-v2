@@ -334,7 +334,11 @@ class BrowserService:
         )
 
     async def send_message_confirmed(self, message: dict) -> bool:
-        """Send and wait for the rover's receipt (hasPeerReceived)."""
+        """Await transport completion: True for peer receipt, False without one.
+
+        Transport errors/timeouts raise; callers must not treat False as proof
+        of delivery. RTSA safety stops need independent stopped-wheel feedback.
+        """
         result = await self._run(
             lambda page: page.evaluate(
                 "async (message) => await window.sendMessageAwait(message)",
@@ -342,7 +346,9 @@ class BrowserService:
             ),
             retry_on_disconnect=False,
         )
-        return result is True
+        if not isinstance(result, bool):
+            raise RuntimeError("RTM safety send returned no delivery result")
+        return result
 
     async def rtm_health(self) -> Optional[dict]:
         if not self.is_ready:

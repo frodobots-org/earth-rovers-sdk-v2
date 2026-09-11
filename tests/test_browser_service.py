@@ -137,3 +137,18 @@ class LockLoopBindingTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SafetySendResultTest(unittest.IsolatedAsyncioTestCase):
+    async def test_safety_send_preserves_false_but_rejects_missing_results(self):
+        from unittest.mock import AsyncMock
+
+        service = BrowserService()
+        for result in (True, False):
+            service._run = AsyncMock(return_value=result)
+            self.assertIs(await service.send_message_confirmed({"linear": 0}), result)
+            self.assertFalse(service._run.call_args.kwargs["retry_on_disconnect"])
+        for result in (None, {}, 1):
+            service._run = AsyncMock(return_value=result)
+            with self.assertRaisesRegex(RuntimeError, "no delivery result"):
+                await service.send_message_confirmed({"linear": 0})

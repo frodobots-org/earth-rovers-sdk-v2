@@ -90,6 +90,7 @@ $(document).ready(function () {
     dispatched: 0,
     delivered: 0,
     failed: 0,
+    unconfirmed: 0,
     lastError: null,
     lastDeliveredAt: null,
   };
@@ -107,8 +108,15 @@ $(document).ready(function () {
     const result = rtmClient
       .sendMessageToPeer({ text: message }, botUid)
       .then((sendResult) => {
-        if (sendResult && sendResult.hasPeerReceived === false) {
-          throw new Error("rover did not receive the message (offline?)");
+        // RTSA peers can accept a command without emitting a peer receipt.
+        // Preserve the distinction from a rejected transport Promise: safety
+        // sends may then verify fresh stopped-wheel telemetry, never liveness.
+        if (!sendResult || typeof sendResult.hasPeerReceived !== "boolean") {
+          throw new Error("RTM send returned no delivery result");
+        }
+        if (!sendResult.hasPeerReceived) {
+          window.rtmStats.unconfirmed += 1;
+          return false;
         }
         window.rtmStats.delivered += 1;
         window.rtmStats.lastError = null;
@@ -132,7 +140,8 @@ $(document).ready(function () {
   };
 
   // Confirmed send for safety-critical messages (watchdog stops): resolves
-  // true only on peer receipt, bounded by a deadline.
+  // true only on an explicit peer receipt, false on server acceptance without
+  // a receipt, and rejects on transport failure or timeout.
   window.sendMessageAwait = function (json) {
     const send = dispatchToRover(json);
     let timer;
@@ -158,6 +167,7 @@ $(document).ready(function () {
       dispatched: window.rtmStats.dispatched,
       delivered: window.rtmStats.delivered,
       failed: window.rtmStats.failed,
+      unconfirmed: window.rtmStats.unconfirmed,
       last_error: window.rtmStats.lastError,
       last_delivered_at: window.rtmStats.lastDeliveredAt,
     };

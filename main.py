@@ -21,6 +21,7 @@ from typing import Literal, Optional
 from browser_service import FEED_QUALITY, FORMAT, QUALITY, BrowserService
 from rtm_client import RtmClient
 from telemetry_hub import TelemetryHub
+from stop_confirmation import StoppedWheelConfirmation
 from tts_service import generate_speech
 from video_feed import FrameBroadcaster, FrameCaptureError
 
@@ -677,15 +678,23 @@ async def control_legacy(request: Request):
 # one arrives, so a broken command path after a motion command means a
 # runaway bot. The watchdog arms when a motion command is ACCEPTED (before
 # dispatch, covering ambiguous delivery) and, once confirmed deliveries are
-# stale for CONTROL_WATCHDOG_S, delivers a CONFIRMED stop (peer receipt) —
-# retrying and rebuilding the RTM session until the rover confirms it. Failed
-# traffic cannot refresh this deadline. CONTROL_WATCHDOG_S=0 disables it.
+# stale for CONTROL_WATCHDOG_S, delivers a stop confirmed by peer receipt or
+# fresh stopped-wheel samples after transport acceptance — retrying and
+# rebuilding the RTM session until confirmed. CONTROL_WATCHDOG_S=0 disables it.
 CONTROL_WATCHDOG_S = float(os.getenv("CONTROL_WATCHDOG_S", "3"))
 WATCHDOG_RETRY_DELAY_S = 1.0
 WATCHDOG_RESET_EVERY = 3  # rebuild the browser/RTM session every N failures
 SAFETY_STOP_CONFIRM_TIMEOUT_S = float(
     os.getenv("SAFETY_STOP_CONFIRM_TIMEOUT_S", "12")
 )
+# RTSA peers may not emit RTM receipts. After the send Promise resolves, allow
+# a bounded wait for new, timestamped zero-RPM readings from all four wheels.
+SAFETY_STOP_TELEMETRY_TIMEOUT_S = 2.0
+# Wheel feedback observes motion, not the firmware's latched command. Keep the
+# stronger receipt policy by default; deployments must explicitly opt in.
+SAFETY_STOP_CONFIRMATION = os.getenv("SAFETY_STOP_CONFIRMATION", "peer_receipt")
+if SAFETY_STOP_CONFIRMATION not in ("peer_receipt", "wheel_telemetry"):
+    raise ValueError("SAFETY_STOP_CONFIRMATION must be peer_receipt or wheel_telemetry")
 
 _control_watchdog_task: Optional[asyncio.Task] = None
 _confirmed_stop_task: Optional[asyncio.Task] = None
@@ -806,6 +815,7 @@ def _ensure_confirmed_stop(lamp=0) -> asyncio.Task:
 
 
 async def _deliver_confirmed_stop(lamp) -> bool:
+    """Await stop transport, then require a receipt or observed wheel stop."""
     stop_command = {"linear": 0, "angular": 0, "lamp": lamp}
     attempt = 0
     delay = WATCHDOG_RETRY_DELAY_S
@@ -813,12 +823,16 @@ async def _deliver_confirmed_stop(lamp) -> bool:
         attempt += 1
         try:
             async with _get_control_dispatch_lock():
-                if await browser_service.send_message_confirmed(stop_command):
-                    logger.warning(
-                        "Safety stop confirmed by rover (attempt %s)", attempt
-                    )
+                received = await browser_service.send_message_confirmed(stop_command)
+                # Start the telemetry boundary AFTER transport acceptance. A
+                # failed or still-pending send must never reach this fallback.
+                if received or (
+                    SAFETY_STOP_CONFIRMATION == "wheel_telemetry"
+                    and await _wait_for_stopped_rover()
+                ):
+                    logger.warning("Safety stop confirmed (attempt %s)", attempt)
                     return True
-                raise RuntimeError("rover did not confirm the stop")
+                raise RuntimeError("safety stop confirmation unavailable under " + SAFETY_STOP_CONFIRMATION)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -836,6 +850,33 @@ async def _deliver_confirmed_stop(lamp) -> bool:
             delay = min(delay * 1.5, 5.0)
     logger.info("Safety stop abandoned because the mission session was cleared")
     return False
+
+
+async def _wait_for_stopped_rover() -> bool:
+    """Observe wheels after transport acceptance, without accepting old samples.
+
+    RPM sample timestamps are Unix seconds in the documented rover payload.
+    Missing feedback or unsynchronized rover clocks fail closed; generic
+    telemetry, scalar speed, and RTM readiness alone cannot confirm a stop.
+    """
+    confirmation = StoppedWheelConfirmation(time.time())
+    queue = telemetry_hub.subscribe()
+
+    async def observe():
+        while True:
+            message = await queue.get()
+            if message.get("type") != "telemetry":
+                continue
+            if confirmation.update(message.get("data"), time.time()):
+                health = await browser_service.rtm_health()
+                return bool(health and health.get("ready"))
+
+    try:
+        return await asyncio.wait_for(observe(), SAFETY_STOP_TELEMETRY_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return False
+    finally:
+        telemetry_hub.unsubscribe(queue)
 
 
 async def _require_confirmed_stop(reason: str, lamp=0):
