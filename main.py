@@ -95,6 +95,8 @@ checkpoints_list_data = {}
 # Arena ceiling cameras. Held apart from auth_response_data so a venue outage
 # can never interfere with rover auth.
 arena_auth_data = {}
+arena_auth_lock = None
+arena_auth_lock_loop = None
 auth_lock = None
 auth_lock_loop = None
 INGEST_TOKEN = secrets.token_urlsafe(32)
@@ -478,12 +480,31 @@ async def retrieve_arena_tokens():
 
 
 async def arena_auth(refresh: bool = False) -> ArenaCameras:
-    global arena_auth_data
-    if refresh or not arena_auth_data:
+    global arena_auth_data, arena_auth_lock, arena_auth_lock_loop
+    loop = asyncio.get_running_loop()
+    if arena_auth_lock is None or arena_auth_lock_loop is not loop:
+        arena_auth_lock = asyncio.Lock()
+        arena_auth_lock_loop = loop
+    observed = arena_auth_data
+    async with arena_auth_lock:
+        arena = ArenaCameras(arena_auth_data)
+        # Unknown expiry is not safe to cache. Refresh before expiry so a new
+        # page never joins with a token about to expire during negotiation.
+        valid = (
+            arena.configured and arena.expires_at is not None
+            and arena.expires_at > time.time() + 30
+        )
+        if valid and (not refresh or arena_auth_data is not observed):
+            return arena
         fetched = await retrieve_arena_tokens()
-        if fetched:
+        candidate = ArenaCameras(fetched)
+        if candidate.configured and (
+            candidate.expires_at is None or candidate.expires_at > time.time() + 30
+        ):
             arena_auth_data = fetched
-    return ArenaCameras(arena_auth_data)
+            return candidate
+        # A failed renewal must not masquerade as success with an old token.
+        return ArenaCameras()
 
 
 async def need_start_mission():
@@ -659,19 +680,6 @@ async def render_index_html(is_spectator: bool):
         ).replace("</", "<\\/"),
         "map_zoom_level": int(os.getenv("MAP_ZOOM_LEVEL", "18")),
     }
-
-    # The arena is optional: when its credentials are missing these render
-    # empty and arenaCameras.js skips its join, leaving the rover feed intact.
-    arena = await arena_auth()
-    template_vars.update(
-        {
-            "arena_appid": html.escape(arena.app_id, quote=True),
-            "arena_rtc_token": html.escape(arena.rtc_token, quote=True),
-            "arena_channel": html.escape(arena.channel_name, quote=True),
-            "arena_uid": html.escape(arena.viewer_uid, quote=True),
-            "arena_cameras": html.escape(json.dumps(arena.cameras), quote=True),
-        }
-    )
 
     return render_template("index.html", template_vars)
 
@@ -1031,7 +1039,7 @@ async def get_arena_token():
     arena = await arena_auth(refresh=True)
     if not arena.configured:
         raise HTTPException(status_code=503, detail="Arena cameras are not configured")
-    return JSONResponse(content=arena_auth_data)
+    return JSONResponse(content=arena_auth_data, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/missions/offroad/cameras")

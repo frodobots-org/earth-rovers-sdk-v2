@@ -8,7 +8,7 @@
  * otherwise collide with a rover UID and cross the two feeds.
  *
  * Nothing here touches the rover client. If the arena is down, this file logs
- * and gives up; the rover feed, control and telemetry carry on unaffected.
+ * and retries independently; the rover feed, control and telemetry carry on unaffected.
  */
 
 var arenaClient = null;
@@ -22,21 +22,16 @@ window.arenaReady = false;
 // reliably survive - the rover client learned the same lesson.
 var arenaSubscribeChain = Promise.resolve();
 
+// Credentials are fetched after the page loads, never while rendering the
+// rover's /sdk page. An arena outage cannot delay rover RTM initialization.
+var arenaConfiguration = { appid: "", token: "", channel: "", uid: "", cameras: {} };
+var arenaOperation = null;
+var arenaRetryTimer = null;
+var arenaRetryDelay = 1000;
+var arenaNeedsRejoin = false;
+
 function arenaConfig() {
-  var raw = (document.getElementById("arena_cameras") || {}).value || "{}";
-  var cameras = {};
-  try {
-    cameras = JSON.parse(raw);
-  } catch (e) {
-    cameras = {};
-  }
-  return {
-    appid: ((document.getElementById("arena_appid") || {}).value || "").trim(),
-    token: ((document.getElementById("arena_rtc_token") || {}).value || "").trim(),
-    channel: ((document.getElementById("arena_channel") || {}).value || "").trim(),
-    uid: ((document.getElementById("arena_uid") || {}).value || "").trim(),
-    cameras: cameras,
-  };
+  return arenaConfiguration;
 }
 
 function arenaCamForUid(uid) {
@@ -71,9 +66,12 @@ function arenaRemovePlayer(uid) {
 }
 
 async function arenaSubscribe(user, mediaType) {
+  const client = arenaClient;
   arenaSubscribeChain = arenaSubscribeChain.then(async function () {
     try {
-      await arenaClient.subscribe(user, mediaType);
+      if (client !== arenaClient || arenaRemoteUsers[user.uid] !== user) return;
+      await client.subscribe(user, mediaType);
+      if (client !== arenaClient || arenaRemoteUsers[user.uid] !== user) return;
       var playerId = arenaPlayerFor(user.uid);
       if (playerId && user.videoTrack) {
         user.videoTrack.play(playerId);
@@ -128,6 +126,7 @@ async function arenaCapture(videoTrack, imageFormat, imageQuality) {
 // when that camera is not publishing, or {error} when a frame exists but
 // cannot be decoded.
 async function getArenaFramePacket(uid, imageFormat, imageQuality) {
+  if (!arenaJoined) return { error: arenaError || "Arena cameras are reconnecting" };
   const user = arenaRemoteUsers[uid];
   if (!user || !user.videoTrack || !user.videoTrack.captureEnabled) {
     return null;
@@ -172,57 +171,106 @@ function arenaStatus() {
   };
 }
 
-// The RTC token expires (an hour by default). Without renewal every camera
-// goes black mid-competition with nothing in the logs to explain it, so pull a
-// fresh one from this same server and hand it to Agora.
-async function arenaRenewToken() {
+function arenaScheduleRetry() {
+  if (arenaRetryTimer !== null) return;
+  arenaRetryTimer = setTimeout(function () {
+    arenaRetryTimer = null;
+    arenaJoin(true);
+  }, arenaRetryDelay);
+  arenaRetryDelay = Math.min(arenaRetryDelay * 2, 30000);
+}
+
+async function arenaFetchConfig() {
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), 18000);
   try {
-    const response = await fetch("/arena/token", { cache: "no-store" });
+    const response = await fetch("/arena/token", {
+      cache: "no-store", signal: abort.signal,
+    });
     if (!response.ok) throw new Error("HTTP " + response.status);
     const fresh = await response.json();
-    if (!fresh || !fresh.RTC_TOKEN) throw new Error("no token in response");
-    await arenaClient.renewToken(fresh.RTC_TOKEN);
-    document.getElementById("arena_rtc_token").value = fresh.RTC_TOKEN;
-    console.log("arena: token renewed");
-  } catch (e) {
-    arenaError = "token renewal failed: " + ((e && e.message) || e);
-    console.error("arena: " + arenaError);
+    if (!fresh || !fresh.APP_ID || !fresh.CHANNEL_NAME || !fresh.RTC_TOKEN) {
+      throw new Error("arena credentials not supplied by the backend");
+    }
+    return {
+      appid: fresh.APP_ID, token: fresh.RTC_TOKEN, channel: fresh.CHANNEL_NAME,
+      uid: String(fresh.USERID || ""), cameras: fresh.CAMERAS || {},
+    };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-async function arenaJoin() {
-  const config = arenaConfig();
-  if (!config.appid || !config.channel || !config.token) {
-    arenaError = "arena credentials not supplied by the backend";
-    console.log("arena: " + arenaError + " - skipping (rover feed unaffected)");
-    window.arenaReady = true; // ready, with nothing to serve
-    return;
-  }
+function arenaRenewToken() {
+  return arenaJoin(true);
+}
 
-  try {
-    arenaClient = AgoraRTC.createClient({ mode: "live", codec: "h264" });
-    arenaClient.on("user-published", arenaHandleUserPublished);
-    arenaClient.on("user-unpublished", arenaHandleUserUnpublished);
-    arenaClient.on("token-privilege-will-expire", arenaRenewToken);
-    arenaClient.on("token-privilege-did-expire", arenaRenewToken);
-
-    // Audience: this client only ever watches the cameras.
-    await arenaClient.setClientRole("audience");
-    const joined = await arenaClient.join(
-      config.appid,
-      config.channel,
-      config.token,
-      config.uid ? Number(config.uid) : null
-    );
-    arenaJoined = true;
-    arenaError = null;
-    console.log("arena: joined " + config.channel + " as uid " + joined);
-  } catch (e) {
-    arenaError = (e && e.message) || String(e);
-    console.error("arena: join failed - " + arenaError);
-  } finally {
-    window.arenaReady = true;
-  }
+function arenaJoin(refresh = false) {
+  if (arenaOperation) return arenaOperation;
+  if (arenaJoined && !refresh) return Promise.resolve();
+  if (arenaRetryTimer !== null) clearTimeout(arenaRetryTimer);
+  arenaRetryTimer = null;
+  arenaOperation = (async function () {
+    try {
+      const config = await arenaFetchConfig();
+      const old = arenaConfig();
+      if (arenaClient && arenaJoined && !arenaNeedsRejoin &&
+          arenaClient.connectionState === "CONNECTED" &&
+          old.appid === config.appid && old.channel === config.channel &&
+          old.uid === config.uid) {
+        await arenaClient.renewToken(config.token);
+        arenaConfiguration = config;
+      } else {
+        // Expired tokens or a changed identity/channel need a fresh join.
+        // Tear down only the arena client; never reset the rover's page.
+        const previous = arenaClient;
+        arenaClient = null;
+        arenaJoined = false;
+        arenaNeedsRejoin = false;
+        if (previous) {
+          previous.removeAllListeners();
+          await previous.leave();
+        }
+        Object.keys(arenaRemoteUsers).forEach(arenaRemovePlayer);
+        arenaRemoteUsers = {};
+        arenaSubscribeChain = Promise.resolve();
+        arenaConfiguration = config;
+        const client = AgoraRTC.createClient({ mode: "live", codec: "h264" });
+        arenaClient = client;
+        client.on("user-published", arenaHandleUserPublished);
+        client.on("user-unpublished", arenaHandleUserUnpublished);
+        client.on("user-left", user => arenaHandleUserUnpublished(user, "video"));
+        client.on("token-privilege-will-expire", arenaRenewToken);
+        client.on("token-privilege-did-expire", function () {
+          arenaNeedsRejoin = true;
+          arenaJoined = false;
+          arenaScheduleRetry();
+        });
+        client.on("connection-state-change", function (state) {
+          if (client !== arenaClient) return;
+          if (state === "DISCONNECTED") {
+            arenaJoined = false;
+            arenaScheduleRetry();
+          }
+        });
+        await client.setClientRole("audience");
+        await client.join(config.appid, config.channel, config.token,
+                          config.uid ? Number(config.uid) : null);
+        arenaJoined = !arenaNeedsRejoin;
+      }
+      arenaError = null;
+      arenaRetryDelay = 1000;
+    } catch (e) {
+      arenaError = (e && e.message) || String(e);
+      console.error("arena: " + arenaError);
+      arenaScheduleRetry();
+    } finally {
+      window.arenaReady = true;
+      arenaOperation = null;
+      if (arenaNeedsRejoin) arenaScheduleRetry();
+    }
+  })();
+  return arenaOperation;
 }
 
 window.getArenaFramePacket = getArenaFramePacket;

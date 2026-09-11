@@ -19,7 +19,7 @@ class ArenaCameras:
     """
 
     def __init__(self, credentials: Optional[dict] = None):
-        self._credentials = credentials or {}
+        self._credentials = credentials if isinstance(credentials, dict) else {}
 
     @property
     def app_id(self) -> str:
@@ -54,7 +54,10 @@ class ArenaCameras:
         backend should not take out every other camera.
         """
         resolved = {}
-        for cam, uid in (self._credentials.get("CAMERAS") or {}).items():
+        cameras = self._credentials.get("CAMERAS")
+        if not isinstance(cameras, dict):
+            return resolved
+        for cam, uid in cameras.items():
             try:
                 resolved[int(cam)] = int(uid)
             except (TypeError, ValueError):
@@ -63,7 +66,7 @@ class ArenaCameras:
 
     @property
     def configured(self) -> bool:
-        return bool(self.app_id and self.channel_name and self.cameras)
+        return bool(self.app_id and self.channel_name and self.rtc_token and self.cameras)
 
     def resolve(self, cam_param: str) -> list:
         """Turn a ?cam= value into [(cam, uid), ...].

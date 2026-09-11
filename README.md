@@ -304,7 +304,7 @@ Example Response:
 
 A camera that is not switched on is simply absent from the response. If some cameras answer and others fail, the response stays `200` and lists the failures under `errors`, so one dark camera never costs you the rest. If none answer: `404` when no camera is publishing, `503` when frames exist but cannot be decoded, and `503` when the arena credentials are unavailable altogether.
 
-The arena is entirely optional. If its credentials cannot be fetched, the SDK logs it and carries on — rover video, control and telemetry are unaffected.
+The arena is entirely optional. Its credentials are fetched after the rover page loads, so an arena outage cannot delay rover control or telemetry startup. Failed arena joins and renewals retry independently with backoff. Expired credentials are refreshed before reuse; a failed renewal returns 503 instead of an old token.
 
 ### GET /missions/offroad/cameras
 
